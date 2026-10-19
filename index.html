@@ -142,6 +142,22 @@ async function fetchHistory(root,path,sym,interval,target){
  const map=new Map(); for(const c of all)map.set(c.t,c);
  return [...map.values()].sort((a,b)=>a.t-b.t).slice(-target);
 }
+async function fetchFundingHistory(sym,startMs,endMs){
+ const all=[]; let startTime=startMs, pages=0;
+ while(startTime<endMs && pages<30){
+  const url='https://fapi.binance.com/fapi/v1/fundingRate?symbol='+encodeURIComponent(sym)+'&startTime='+startTime+'&endTime='+endMs+'&limit=1000';
+  const rows=await get(url); if(!Array.isArray(rows)||!rows.length)break;
+  for(const r of rows){const t=Number(r.fundingTime),rate=Number(r.fundingRate);if(Number.isFinite(t)&&Number.isFinite(rate))all.push({t,rate});}
+  pages++; const last=Number(rows[rows.length-1].fundingTime); if(!Number.isFinite(last)||last<startTime)break; startTime=last+1;
+  if(rows.length<1000)break;
+ }
+ const unique=new Map(); for(const x of all)unique.set(x.t,x); return [...unique.values()].sort((a,b)=>a.t-b.t);
+}
+function historicalFundingCostR(side,entry,risk,entryTime,exitTime,fundingRows){
+ // Positive funding means longs pay shorts; negative funding reverses the direction.
+ let costPct=0; for(const f of fundingRows){if(f.t>entryTime&&f.t<=exitTime)costPct+=(side==='LONG'?f.rate:-f.rate);}
+ return costPct/(risk/entry);
+}
 async function runBacktest(){
  const btn=$('runBacktest'); if(btn.disabled)return; btn.disabled=true;
  $('btStatus').textContent='Baixando histórico paginado…'; $('btSymbolLabel').textContent=$('symbol').value;
@@ -154,6 +170,11 @@ async function runBacktest(){
    fetchHistory(root,path,sym,'15m',target),fetchHistory(root,path,sym,'1h',target1),fetchHistory(root,path,sym,'4h',target4)
   ]);
   if(c15.length<200||c1.length<55||c4.length<55)throw Error('Histórico insuficiente: 15m '+c15.length+', 1h '+c1.length+', 4h '+c4.length+'.');
+  let fundingRows=[];
+  if(market==='futures'){
+   $('btStatus').textContent='Buscando histórico real de funding…';
+   try{fundingRows=await fetchFundingHistory(sym,c15[0].t,c15[c15.length-1].ct);}catch(e){fundingRows=[];}
+  }
   $('btStatus').textContent='Calculando indicadores e operações…';
   const fee=Number($('btFee').value)/100, slip=Number($('btSlip').value)/10000, funding8h=Number($('btFunding').value)/100;
   if(![fee,slip,funding8h].every(x=>Number.isFinite(x)&&x>=0))throw Error('Custos devem ser números iguais ou maiores que zero.');
@@ -175,22 +196,28 @@ async function runBacktest(){
    if(!side){i++;continue;}
    const entryIndex=i+1, entry=c15[entryIndex].o, risk=1.5*x.a;
    const stop=side==='LONG'?entry-risk:entry+risk, targetPrice=side==='LONG'?entry+risk:entry-risk;
-   let gross=null,exitIndex=-1,exitReason='';
+   let gross=null,exitIndex=-1,exitReason='',exit=NaN;
    for(let j=entryIndex;j<c15.length;j++){
     const q=c15[j],hitStop=side==='LONG'?q.l<=stop:q.h>=stop,hitTarget=side==='LONG'?q.h>=targetPrice:q.l<=targetPrice;
-    if(hitStop){gross=-1;exitIndex=j;exitReason='STOP';break;}
-    if(hitTarget){gross=1;exitIndex=j;exitReason='TP1';break;}
+    // Conservative ordering: stop wins if both levels are touched in one candle.
+    if(hitStop){exitIndex=j;exitReason='STOP';exit=(side==='LONG'&&q.o<stop)||(side==='SHORT'&&q.o>stop)?q.o:stop;break;}
+    if(hitTarget){exitIndex=j;exitReason='TP1';exit=targetPrice;break;}
    }
-   if(gross===null){trades.push({side,gross:null,net:null,time:sig.t,entry,risk,exitIndex:-1,exitReason:'ABERTA'});break;}
-   // Fill at the modeled stop/target price, not the candle close. Slippage is modeled as an adverse extra cost.
-   const exit=exitReason==='TP1'?targetPrice:stop;
+   if(exitIndex<0){trades.push({side,gross:null,net:null,time:sig.t,entry,risk,exitIndex:-1,exitReason:'ABERTA'});break;}
+   // Calculate gross R from the modeled fill price, including adverse stop gaps.
+   gross=(side==='LONG'?(exit-entry):(entry-exit))/risk;
    const durationHours=Math.max(0,(c15[exitIndex].ct-c15[entryIndex].t)/3600000);
-   const feeCostPct=fee*(entry+exit)/entry;
+   const feeCostPct=fee*(entry+Math.abs(exit))/entry;
    const slipCostPct=slip*2;
-   const fundingCostPct=market==='futures'?(funding8h*durationHours/8):0;
-   // Costs are percentages of entry notional, converted to R using price risk / entry price.
-   const costR=(feeCostPct+slipCostPct+fundingCostPct)/(risk/entry);
-   trades.push({side,gross,net:gross-costR,costR,time:sig.t,entry,exit,risk,exitIndex,exitReason,durationHours});
+   let fundingCostR=0, fundingMethod='sem funding';
+   if(market==='futures'){
+    if(fundingRows.length){fundingCostR=historicalFundingCostR(side,entry,risk,c15[entryIndex].t,c15[exitIndex].ct,fundingRows);fundingMethod='histórico';}
+    else {fundingCostR=(side==='LONG'?1:-1)*funding8h*durationHours/8/(risk/entry);fundingMethod='estimado';}
+   }
+   // Fees and slippage are costs on entry/exit notional; funding is signed by side and historical rate when available.
+   const feeSlipR=(feeCostPct+slipCostPct)/(risk/entry);
+   const costR=feeSlipR+fundingCostR;
+   trades.push({side,gross,net:gross-costR,costR,time:sig.t,entry,exit,risk,exitIndex,exitReason,durationHours,fundingMethod});
    i=exitIndex+1;
   }
   const closed=trades.filter(t=>t.gross!==null), longs=closed.filter(t=>t.side==='LONG'),shorts=closed.filter(t=>t.side==='SHORT');
@@ -212,7 +239,7 @@ async function runBacktest(){
   $('btTradeRows').innerHTML=closed.slice(-15).reverse().map(t=>'<tr><td>'+time(t.time)+'</td><td>'+t.side+'</td><td>'+money(t.entry)+'</td><td>'+money(t.exit)+'</td><td>'+t.exitReason+'</td><td>'+t.durationHours.toFixed(1)+' h</td><td>'+(t.gross>0?'+':'')+t.gross.toFixed(2)+'R</td><td>'+(t.net>0?'+':'')+t.net.toFixed(2)+'R</td><td>'+t.costR.toFixed(2)+'R</td></tr>').join('')||'<tr><td colspan="9">Nenhuma operação fechada.</td></tr>';
   const eq=[0]; closed.forEach(t=>eq.push(eq[eq.length-1]+t.net)); if(window.btEquityChart)window.btEquityChart.destroy(); window.btEquityChart=new Chart($('btEquity'),{type:'line',data:{labels:eq.map((_,i)=>i===0?'Início':String(i)),datasets:[{label:'R acumulado líquido',data:eq,borderColor:'#79aaff',backgroundColor:'rgba(121,170,255,.12)',fill:true,borderWidth:2,pointRadius:0,tension:0}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:'#91a0b8'}}},scales:{x:{ticks:{color:'#91a0b8',maxTicksLimit:8},grid:{color:'#202c3e'}},y:{ticks:{color:'#91a0b8'},grid:{color:'#202c3e'}}}}});
   const openCount=trades.filter(t=>t.gross===null).length;
-  $('btDisclaimer').textContent='Histórico recebido: '+c15.length+' candles 15m, '+c1.length+' candles 1h e '+c4.length+' candles 4h. Taxa por lado configurada: '+(fee*100).toFixed(3)+'%; slippage por lado: '+(slip*10000).toFixed(1)+' bps; funding estimado: '+(funding8h*100).toFixed(3)+'% por 8h ('+(market==='spot'?'não aplicado ao Spot':'estimativa, não funding histórico')+'). Custos convertidos para R sobre o notional de entrada e saída; isso é uma aproximação e não considera taxas históricas variáveis, funding efetivamente pago/recebido, spread, liquidação, margem ou alavancagem. Stop tem prioridade se stop e TP1 ocorrerem no mesmo candle. Só TP1 é simulado; TP2/TP3 e saídas parciais não são. '+openCount+' operação(ões) aberta(s) foram excluídas. O slippage é uma penalização aproximada e não simula gaps; o funding usa taxa constante configurada, não funding histórico real. O modelo é de 1 unidade sem alavancagem/margem, então não representa retorno percentual sobre capital. O backtest não garante resultados futuros.';
+  $('btDisclaimer').textContent='Histórico recebido: '+c15.length+' candles 15m, '+c1.length+' candles 1h e '+c4.length+' candles 4h. Taxa por lado configurada: '+(fee*100).toFixed(3)+'%; slippage por lado: '+(slip*10000).toFixed(1)+' bps; funding configurado: '+(funding8h*100).toFixed(3)+'% por 8h ('+(market==='spot'?'não aplicado ao Spot':(fundingRows.length?'histórico real da API de funding':'estimativa: histórico de funding indisponível'))+'). Funding é assinado por direção: taxa positiva cobra LONG e remunera SHORT. Custos convertidos para R sobre o notional de entrada e saída; isso é uma aproximação e não considera taxas históricas variáveis, funding efetivamente pago/recebido, spread, liquidação, margem ou alavancagem. Stop tem prioridade se stop e TP1 ocorrerem no mesmo candle. Stops com gap são preenchidos no open quando isso é pior que o stop. Só TP1 é simulado; TP2/TP3 e saídas parciais não são. '+openCount+' operação(ões) aberta(s) foram excluídas. O slippage é uma penalização aproximada; stops atravessados por gap são preenchidos no open quando pior. Quando disponível, usa-se o histórico público de funding; caso contrário, recorre-se à estimativa configurada. O modelo é de 1 unidade sem alavancagem/margem, então não representa retorno percentual sobre capital. O backtest não garante resultados futuros.';
   $('btProgress').style.width='100%'; $('btStatus').textContent='Concluído · '+new Date().toLocaleTimeString('pt-BR');
  }catch(e){$('btProgress').style.width='0%'; $('btStatus').textContent='Falha no teste: '+e.message;$('btDisclaimer').textContent='Não foi possível concluir o backtest. Verifique a conexão, limites dos endpoints públicos e histórico do par selecionado.';}
  finally{btn.disabled=false;}
