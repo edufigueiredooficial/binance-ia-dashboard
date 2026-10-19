@@ -31,16 +31,25 @@
 </div></div>
 <section class="panel" id="backtestPanel">
  <div class="head"><h2>Backtest histórico · <span id="btSymbolLabel">BTCUSDT</span></h2><span class="tag">SIMULAÇÃO · SEM ORDENS</span></div>
- <p class="muted">Usa os filtros atuais: sinal em 15m, tendência confirmada em 1h/4h, RSI, volume relativo e rompimento. A entrada ocorre na abertura do candle seguinte; stop e alvo 1R são calculados a partir dessa entrada. Apenas uma posição simulada por vez.</p>
+ <p class="muted">Sinal em 15m com confirmação 1h/4h. O histórico é baixado em páginas da API pública, respeitando limites por chamada. Entrada na abertura seguinte; stop/TP1 baseados no ATR do sinal. Uma posição por vez.</p>
+ <div class="tiles" style="margin-top:10px">
+  <div class="tile"><label for="btHistory">Candles 15m (alvo)</label><select id="btHistory"><option value="2000">2.000 · ~21 dias</option><option value="5000" selected>5.000 · ~52 dias</option><option value="10000">10.000 · ~104 dias</option></select></div>
+  <div class="tile"><label for="btFee">Taxa por lado (%)</label><input id="btFee" type="number" min="0" max="1" step="0.001" value="0.1"></div>
+  <div class="tile"><label for="btSlip">Slippage por lado (bps)</label><input id="btSlip" type="number" min="0" max="100" step="0.5" value="2"></div>
+  <div class="tile"><label for="btFunding">Funding estimado por 8h (%)</label><input id="btFunding" type="number" min="0" max="1" step="0.001" value="0.01"></div>
+ </div>
+ <p class="muted">Taxa padrão: 0,1%/lado Spot; ajuste manualmente para sua conta. Futures use a taxa efetiva do seu nível. Funding é uma estimativa configurável, não uma série histórica real.</p>
  <button class="primary" id="runBacktest">▶ Executar backtest</button>
  <span class="muted" id="btStatus" style="margin-left:8px">Aguardando execução.</span>
  <div class="metrics" style="margin-top:12px">
   <div class="metric"><div class="label">Operações encerradas</div><div class="value" id="btTrades">—</div><div class="muted" id="btPeriod">Período testado</div></div>
   <div class="metric"><div class="label">Taxa de acerto</div><div class="value" id="btWin">—</div><div class="muted">Alvo 1R vs. stop</div></div>
-  <div class="metric"><div class="label">Resultado bruto</div><div class="value" id="btR">—</div><div class="muted">Em múltiplos de R</div></div>
-  <div class="metric"><div class="label">Drawdown máximo</div><div class="value" id="btDD">—</div><div class="muted">Curva acumulada em R</div></div>
+  <div class="metric"><div class="label">Resultado líquido</div><div class="value" id="btR">—</div><div class="muted">Após custos estimados, em R</div></div>
+  <div class="metric"><div class="label">Drawdown máximo</div><div class="value" id="btDD">—</div><div class="muted">Curva líquida acumulada em R</div></div>
+  <div class="metric"><div class="label">Fator de lucro líquido</div><div class="value" id="btPF">—</div><div class="muted">Ganhos líquidos / perdas líquidas</div></div>
+  <div class="metric"><div class="label">Custos estimados</div><div class="value" id="btCosts">—</div><div class="muted">Em múltiplos de R</div></div>
  </div>
- <div class="tablewrap"><table><thead><tr><th>Direção</th><th>Operações</th><th>Acertos</th><th>Taxa de acerto</th><th>Resultado (R)</th></tr></thead><tbody id="btRows"><tr><td colspan="5">Execute o backtest para ver os resultados.</td></tr></tbody></table></div>
+ <div class="tablewrap"><table><thead><tr><th>Direção</th><th>Operações</th><th>Acertos</th><th>Taxa de acerto</th><th>Resultado líquido (R)</th></tr></thead><tbody id="btRows"><tr><td colspan="5">Execute o backtest para ver os resultados.</td></tr></tbody></table></div>
  <div class="warning" id="btDisclaimer">Ainda não executado. O teste usa apenas candles fechados, alinha os timeframes superiores por horário de fechamento e simula no máximo uma posição por vez. Custos e funding ainda precisam ser descontados; o resultado é bruto e não garante desempenho futuro.</div>
 </section>
 
@@ -118,90 +127,83 @@ function evaluate(aa){
 }
 async function load(){if(busy)return;busy=true;$('error').textContent='';$('status').textContent='● Consultando Binance…';$('refresh').disabled=true;try{let s=$('symbol').value,tf=$('tf').value,p=$('market').value==='spot'?'/api/v3/ticker/24hr':'/fapi/v1/ticker/24hr';let [tk,c15,c1,c4,sel]=await Promise.all([get(base()+p+'?symbol='+s),getCandles(s,'15m'),getCandles(s,'1h'),getCandles(s,'4h'),getCandles(s,tf)]);if([c15,c1,c4,sel].some(x=>x.length<55))throw Error('Histórico insuficiente para os indicadores');if([c15,c1,c4,sel].some(x=>x.some(k=>![k.t,k.o,k.h,k.l,k.c,k.v,k.ct].every(Number.isFinite))))throw Error('Histórico contém valores inválidos');let aa={'15m':analyze(c15),'1h':analyze(c1),'4h':analyze(c4)},a=analyze(sel);$('price').textContent=money(+tk.lastPrice);$('priceSub').textContent=s+' · '+$('market').selectedOptions[0].text;$('change').textContent=(+tk.priceChangePercent).toFixed(2)+'%';$('change').className='value '+(+tk.priceChangePercent>=0?'good':'bad');$('rsi').textContent=Number.isFinite(a.r)?a.r.toFixed(1):'—';$('vol').textContent=compact(a.last.v);$('ema20').textContent=money(a.e20last);$('ema50').textContent=money(a.e50last);$('atr').textContent=Number.isFinite(a.a)?money(a.a):'—';$('relvol').textContent=Number.isFinite(a.rv)?a.rv.toFixed(2)+'×':'—';chartDraw(a,tf);evaluate(aa);$('tfRows').innerHTML=['15m','1h','4h'].map(t=>'<tr><td>'+t+'</td><td>'+money(aa[t].last.c)+'</td><td>'+money(aa[t].e20last)+' / '+money(aa[t].e50last)+'</td><td>'+trend(aa[t])+'</td></tr>').join('');await extra(s);$('updated').textContent=time(Date.now());$('candleTime').textContent=time(a.last.ct);$('status').textContent='● Dados recebidos · página aberta'}catch(e){$('error').textContent='Falha ao atualizar: '+e.message+'. Confira a conexão e tente novamente; nenhum sinal foi confirmado.';$('status').textContent='● Falha na atualização';$('state').textContent='DADOS INSUFICIENTES';$('reason').textContent='A análise foi interrompida porque não foi possível validar os dados.'}finally{busy=false;$('refresh').disabled=false}}
 
+async function fetchHistory(root,path,sym,interval,target){
+ const limit=1000; let all=[],endTime=Date.now(),pages=0;
+ while(all.length<target && pages<Math.ceil(target/limit)+2){
+  const want=Math.min(limit,target-all.length);
+  const url=root+path+'?symbol='+encodeURIComponent(sym)+'&interval='+interval+'&limit='+want+'&endTime='+endTime;
+  const raw=await get(url); if(!Array.isArray(raw)||raw.length===0)break;
+  // Parse each page, then walk backwards. Keep all pages chronological and deduplicate by open time.
+  const page=parse(raw); all=page.concat(all);
+  pages++; const first=page[0].t; if(!Number.isFinite(first)||first<=0)break; endTime=first-1;
+  if(raw.length<want)break;
+  if(pages%3===0) $('btStatus').textContent='Baixando '+interval+': '+Math.min(all.length,target)+' / '+target+' candles…';
+ }
+ const map=new Map(); for(const c of all)map.set(c.t,c);
+ return [...map.values()].sort((a,b)=>a.t-b.t).slice(-target);
+}
 async function runBacktest(){
- const btn=$('runBacktest');
- if(btn.disabled)return;
- btn.disabled=true;
- $('btStatus').textContent='Baixando candles históricos…';
- $('btSymbolLabel').textContent=$('symbol').value;
+ const btn=$('runBacktest'); if(btn.disabled)return; btn.disabled=true;
+ $('btStatus').textContent='Baixando histórico paginado…'; $('btSymbolLabel').textContent=$('symbol').value;
  try{
   const sym=$('symbol').value, market=$('market').value;
   const root=market==='spot'?'https://data-api.binance.vision':'https://fapi.binance.com';
   const path=market==='spot'?'/api/v3/klines':'/fapi/v1/klines';
-  const [raw15,raw1,raw4]=await Promise.all([
-   get(root+path+'?symbol='+sym+'&interval=15m&limit=1000'),
-   get(root+path+'?symbol='+sym+'&interval=1h&limit=1000'),
-   get(root+path+'?symbol='+sym+'&interval=4h&limit=1000')
+  const target=Number($('btHistory').value), target1=Math.min( Math.ceil(target/4),5000), target4=Math.min(Math.ceil(target/16),2500);
+  const [c15,c1,c4]=await Promise.all([
+   fetchHistory(root,path,sym,'15m',target),fetchHistory(root,path,sym,'1h',target1),fetchHistory(root,path,sym,'4h',target4)
   ]);
-  const c15=parse(raw15),c1=parse(raw1),c4=parse(raw4);
-  if(c15.length<100||c1.length<55||c4.length<55)throw Error('Histórico insuficiente para um teste minimamente útil.');
-  $('btStatus').textContent='Calculando operações…';
-
-  // Indicadores são calculados somente com dados disponíveis até cada candle fechado.
+  if(c15.length<200||c1.length<55||c4.length<55)throw Error('Histórico insuficiente: 15m '+c15.length+', 1h '+c1.length+', 4h '+c4.length+'.');
+  $('btStatus').textContent='Calculando indicadores e operações…';
+  const fee=Number($('btFee').value)/100, slip=Number($('btSlip').value)/10000, funding8h=Number($('btFunding').value)/100;
+  if(![fee,slip,funding8h].every(x=>Number.isFinite(x)&&x>=0))throw Error('Custos devem ser números iguais ou maiores que zero.');
   const a15=c15.map((_,i)=>i>=54?analyze(c15.slice(0,i+1)):null);
   const a1=c1.map((_,i)=>i>=54?analyze(c1.slice(0,i+1)):null);
   const a4=c4.map((_,i)=>i>=54?analyze(c4.slice(0,i+1)):null);
   let i1=0,i4=0,trades=[],i=54;
-
   while(i<c15.length-1){
    const sig=c15[i];
-   // Só usar candles 1h/4h cujo fechamento ocorreu até o fechamento do sinal 15m.
    while(i1+1<c1.length&&c1[i1+1].ct<=sig.ct)i1++;
    while(i4+1<c4.length&&c4[i4+1].ct<=sig.ct)i4++;
    if(!a15[i]||!a1[i1]||!a4[i4]){i++;continue;}
-
    const x=a15[i],y=a1[i1],z=a4[i4],trends=[trend(x),trend(y),trend(z)];
    if(!Number.isFinite(x.r)||!Number.isFinite(x.a)||x.a<=0||!Number.isFinite(x.rv)){i++;continue;}
-   const prior=c15.slice(i-20,i);
-   if(prior.length<20){i++;continue;}
-   const hi=Math.max(...prior.map(q=>q.h)),lo=Math.min(...prior.map(q=>q.l));
-   let side=null;
+   const prior=c15.slice(i-20,i); if(prior.length<20){i++;continue;}
+   const hi=Math.max(...prior.map(q=>q.h)),lo=Math.min(...prior.map(q=>q.l)); let side=null;
    if(trends.every(t=>t==='ALTA')&&x.r>=50&&x.r<=68&&x.rv>=1.2&&sig.c>hi)side='LONG';
    if(trends.every(t=>t==='BAIXA')&&x.r>=32&&x.r<=50&&x.rv>=1.2&&sig.c<lo)side='SHORT';
    if(!side){i++;continue;}
-
-   // Entrada na abertura seguinte; níveis ancorados na entrada real simulada, não no fechamento anterior.
    const entryIndex=i+1, entry=c15[entryIndex].o, risk=1.5*x.a;
-   const stop=side==='LONG'?entry-risk:entry+risk;
-   const target=side==='LONG'?entry+risk:entry-risk;
-   let result=null,exitIndex=-1,exitReason='';
+   const stop=side==='LONG'?entry-risk:entry+risk, targetPrice=side==='LONG'?entry+risk:entry-risk;
+   let gross=null,exitIndex=-1,exitReason='';
    for(let j=entryIndex;j<c15.length;j++){
-    const q=c15[j];
-    const hitStop=side==='LONG'?q.l<=stop:q.h>=stop;
-    const hitTarget=side==='LONG'?q.h>=target:q.l<=target;
-    // Tratamento conservador se stop e alvo forem tocados no mesmo candle.
-    if(hitStop){result=-1;exitIndex=j;exitReason='STOP';break;}
-    if(hitTarget){result=1;exitIndex=j;exitReason='TP1';break;}
+    const q=c15[j],hitStop=side==='LONG'?q.l<=stop:q.h>=stop,hitTarget=side==='LONG'?q.h>=targetPrice:q.l<=targetPrice;
+    if(hitStop){gross=-1;exitIndex=j;exitReason='STOP';break;}
+    if(hitTarget){gross=1;exitIndex=j;exitReason='TP1';break;}
    }
-   if(result===null){
-    // Operação não encerrada até o fim da amostra: não entra nas estatísticas fechadas.
-    trades.push({side,result:null,time:sig.t,entry,stop,exitIndex:-1,exitReason:'ABERTA'});
-    break;
-   }
-   trades.push({side,result,time:sig.t,entry,stop,exitIndex,exitReason});
-   // Não permite operações simultâneas; a próxima avaliação ocorre depois do candle de saída.
+   if(gross===null){trades.push({side,gross:null,net:null,time:sig.t,entry,risk,exitIndex:-1,exitReason:'ABERTA'});break;}
+   const exit=c15[exitIndex].c, durationHours=Math.max(0,(c15[exitIndex].ct-c15[entryIndex].t)/3600000);
+   // Approximate round-trip costs on entry + exit notional, converted into R. Funding is an estimate, not historical data.
+   const feeCost=(fee*2), slipCost=(slip*2), fundingCost=market==='futures'?(funding8h*durationHours/8):0;
+   const costR=(entry*(feeCost+slipCost+fundingCost))/risk;
+   trades.push({side,gross,net:gross-costR,costR,time:sig.t,entry,exit,risk,exitIndex,exitReason});
    i=exitIndex+1;
   }
-
-  const closed=trades.filter(t=>t.result!==null);
-  const longs=closed.filter(t=>t.side==='LONG'),shorts=closed.filter(t=>t.side==='SHORT');
-  const sum=arr=>({n:arr.length,w:arr.filter(t=>t.result>0).length,r:arr.reduce((v,t)=>v+t.result,0)});
-  const all=sum(closed);
-  let equity=0,peak=0,dd=0;
-  closed.forEach(t=>{equity+=t.result;peak=Math.max(peak,equity);dd=Math.max(dd,peak-equity);});
-  $('btTrades').textContent=String(all.n);
-  $('btWin').textContent=all.n?(100*all.w/all.n).toFixed(1)+'%':'—';
-  $('btR').textContent=(all.r>0?'+':'')+all.r.toFixed(2)+'R';
-  $('btDD').textContent=dd.toFixed(2)+'R';
-  $('btPeriod').textContent=new Date(c15[0].t).toLocaleDateString('pt-BR')+' – '+new Date(c15[c15.length-1].ct).toLocaleDateString('pt-BR');
+  const closed=trades.filter(t=>t.gross!==null), longs=closed.filter(t=>t.side==='LONG'),shorts=closed.filter(t=>t.side==='SHORT');
+  const sum=arr=>({n:arr.length,w:arr.filter(t=>t.net>0).length,r:arr.reduce((v,t)=>v+t.net,0),gross:arr.reduce((v,t)=>v+t.gross,0),cost:arr.reduce((v,t)=>v+t.costR,0)});
+  const all=sum(closed); let equity=0,peak=0,dd=0;
+  closed.forEach(t=>{equity+=t.net;peak=Math.max(peak,equity);dd=Math.max(dd,peak-equity);});
+  const wins=closed.filter(t=>t.net>0).reduce((a,t)=>a+t.net,0),losses=Math.abs(closed.filter(t=>t.net<0).reduce((a,t)=>a+t.net,0));
+  $('btTrades').textContent=String(all.n); $('btWin').textContent=all.n?(100*all.w/all.n).toFixed(1)+'%':'—';
+  $('btR').textContent=(all.r>0?'+':'')+all.r.toFixed(2)+'R'; $('btDD').textContent=dd.toFixed(2)+'R';
+  $('btPF').textContent=losses>0?(wins/losses).toFixed(2):wins>0?'∞':'—'; $('btCosts').textContent=all.cost.toFixed(2)+'R';
+  $('btPeriod').textContent=new Date(c15[0].t).toLocaleDateString('pt-BR')+' – '+new Date(c15[c15.length-1].ct).toLocaleDateString('pt-BR')+' · '+c15.length.toLocaleString('pt-BR')+' candles 15m';
   $('btRows').innerHTML=[['LONG',sum(longs)],['SHORT',sum(shorts)],['TOTAL',all]].map(([label,v])=>'<tr><td>'+label+'</td><td>'+v.n+'</td><td>'+v.w+'</td><td>'+(v.n?(100*v.w/v.n).toFixed(1)+'%':'—')+'</td><td>'+(v.r>0?'+':'')+v.r.toFixed(2)+'R</td></tr>').join('');
-  const openCount=trades.filter(t=>t.result===null).length;
-  $('btDisclaimer').textContent='Resultado bruto, sem taxas, slippage ou funding. Entrada na abertura do candle seguinte; stop e alvo 1R calculados a partir da entrada e do ATR conhecido no sinal. Apenas uma posição por vez. Se stop e alvo forem tocados no mesmo candle, conta-se stop primeiro. Alvos 2R/3R e saídas parciais não são simulados neste backtest. '+openCount+' operação(ões) ainda aberta(s) foram excluídas das estatísticas. O histórico é limitado a até 1000 candles por timeframe; resultado não garante desempenho futuro.';
+  const openCount=trades.filter(t=>t.gross===null).length;
+  $('btDisclaimer').textContent='Histórico recebido: '+c15.length+' candles 15m, '+c1.length+' candles 1h e '+c4.length+' candles 4h. Taxa por lado configurada: '+(fee*100).toFixed(3)+'%; slippage por lado: '+(slip*10000).toFixed(1)+' bps; funding estimado: '+(funding8h*100).toFixed(3)+'% por 8h ('+(market==='spot'?'não aplicado ao Spot':'estimativa, não funding histórico')+'). Custos convertidos para R sobre o notional de entrada; isso é uma aproximação e não considera taxas históricas variáveis, funding efetivamente pago/recebido, spread, liquidação, margem ou alavancagem. Stop tem prioridade se stop e TP1 ocorrerem no mesmo candle. Só TP1 é simulado; TP2/TP3 e saídas parciais não são. '+openCount+' operação(ões) aberta(s) foram excluídas. O backtest não garante resultados futuros.';
   $('btStatus').textContent='Concluído · '+new Date().toLocaleTimeString('pt-BR');
- }catch(e){
-  $('btStatus').textContent='Falha no teste: '+e.message;
-  $('btDisclaimer').textContent='Não foi possível concluir o backtest. Verifique a conexão, a disponibilidade dos endpoints públicos e o histórico do par selecionado.';
- }finally{btn.disabled=false;}
+ }catch(e){$('btStatus').textContent='Falha no teste: '+e.message;$('btDisclaimer').textContent='Não foi possível concluir o backtest. Verifique a conexão, limites dos endpoints públicos e histórico do par selecionado.';}
+ finally{btn.disabled=false;}
 }
 $('runBacktest').addEventListener('click',runBacktest);
 
