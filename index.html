@@ -24,9 +24,9 @@
 <div class="warning">O candle ainda em formação é excluído dos cálculos. RSI usa suavização de Wilder; ATR usa ATR de Wilder. Indicadores calculados no navegador com dados públicos.</div></section>
 <section class="panel"><div class="head"><h2>Leitura dos timeframes</h2><span class="tag">CANDLES FECHADOS</span></div><div class="tablewrap"><table><thead><tr><th>Timeframe</th><th>Fechamento</th><th>EMA20 / EMA50</th><th>Tendência</th></tr></thead><tbody id="tfRows"><tr><td colspan="4">Carregando…</td></tr></tbody></table></div></section>
 </div><div>
-<section class="panel"><div class="head"><h2>Avaliação técnica</h2><span class="tag">REGRAS EXPERIMENTAIS</span></div><div class="signal"><div class="label">Estado atual</div><div class="state" id="state">Carregando análise…</div><div class="muted" id="reason">Aguardando dados da Binance.</div><p class="muted" id="trend">Tendência 15m / 1h / 4h: —</p></div>
+<section class="panel"><div class="head"><h2>Avaliação técnica · sinal calculado em 15m</h2><span class="tag">REGRAS EXPERIMENTAIS</span></div><div class="signal"><div class="label">Estado atual</div><div class="state" id="state">Carregando análise…</div><div class="muted" id="reason">Aguardando dados da Binance.</div><p class="muted" id="trend">Tendência 15m / 1h / 4h: —</p></div>
 <div class="tiles"><div class="tile"><span class="label">Entrada indicativa</span><strong id="entry">—</strong></div><div class="tile"><span class="label">Stop / invalidação</span><strong id="stop">—</strong></div><div class="tile"><span class="label">Alvo 1 · 1R</span><strong id="tp1">—</strong></div><div class="tile"><span class="label">Alvo 2 · 2R</span><strong id="tp2">—</strong></div><div class="tile"><span class="label">Alvo 3 · 3R</span><strong id="tp3">—</strong></div><div class="tile"><span class="label">Risco/retorno</span><strong id="rr">—</strong></div></div>
-<div class="warning">Triagem técnica experimental, não recomendação garantida. Não calcula tamanho da posição, não conhece seu capital e não envia ordens.</div></section>
+<div class="warning">O sinal é sempre calculado em 15m, mesmo se o gráfico estiver em 1h ou 4h. Triagem experimental; custos, slippage e funding não são descontados. Não calcula tamanho da posição nem envia ordens.</div></section>
 <section class="panel"><div class="head"><h2>USDⓈ-M Futures</h2><span class="tag" id="futureTag">Selecione Futures</span></div><div class="tiles" style="margin-top:0"><div class="tile"><span class="label">Funding rate</span><strong id="funding">—</strong></div><div class="tile"><span class="label">Mark price</span><strong id="mark">—</strong></div><div class="tile"><span class="label">Open interest</span><strong id="oi">—</strong></div><div class="tile"><span class="label">Próximo funding</span><strong id="fundTime">—</strong></div></div><p class="muted" id="futureNote">Dados exibidos quando Futures estiver selecionado e os endpoints estiverem disponíveis.</p></section>
 </div></div><div class="error" id="error"></div>
 <footer class="foot">Última atualização: <span id="updated">—</span>. Último candle fechado: <span id="candleTime">—</span>. Atualização automática a cada 60 segundos enquanto esta página estiver aberta. Dados públicos da Binance; sem acesso a contas privadas e sem execução de ordens.</footer>
@@ -63,8 +63,16 @@ function parse(raw){
  if(!Array.isArray(raw))throw Error('Resposta de candles inválida');
  let a=raw.map(x=>({t:+x[0],o:+x[1],h:+x[2],l:+x[3],c:+x[4],v:+x[5],ct:+x[6]}));
  if(a.some(x=>![x.t,x.o,x.h,x.l,x.c,x.v,x.ct].every(Number.isFinite)))throw Error('Candles contêm valores inválidos');
+ // Validar TODOS os candles, inclusive o primeiro e o candle ainda aberto.
+ for(let i=0;i<a.length;i++){
+  const x=a[i];
+  if(x.t<0||x.ct<=x.t||x.o<=0||x.h<=0||x.l<=0||x.c<=0||x.v<0)throw Error('OHLCV contém preço, volume ou horário inválido');
+  if(x.h<x.l||x.h<Math.max(x.o,x.c)||x.l>Math.min(x.o,x.c))throw Error('OHLCV inconsistente');
+  if(i>0&&x.t<=a[i-1].t)throw Error('Candles fora de ordem ou duplicados');
+ }
+ // A Binance pode devolver o candle corrente; ele só é removido se ainda não fechou.
  if(a.length&&a[a.length-1].ct>Date.now())a.pop();
- for(let i=1;i<a.length;i++){if(a[i].t<=a[i-1].t)throw Error('Candles fora de ordem ou duplicados');if(a[i].h<a[i].l||a[i].h<Math.max(a[i].o,a[i].c)||a[i].l>Math.min(a[i].o,a[i].c)||a[i].v<0)throw Error('OHLCV inconsistente');}
+ if(a.length<1)throw Error('Nenhum candle fechado disponível');
  return a
 }
 async function getCandles(sym,tf){let p=$('market').value==='spot'?'/api/v3/klines':'/fapi/v1/klines';return parse(await get(base()+p+'?symbol='+sym+'&interval='+tf+'&limit=120'))}
@@ -74,7 +82,7 @@ function chartDraw(a,tf){let c=a.c.slice(-65),s=a.c.length-c.length,l=c.map(x=>n
 async function extra(sym){if($('market').value!=='futures'){['funding','mark','oi','fundTime'].forEach(x=>$(x).textContent='—');$('futureTag').textContent='Selecione Futures';$('futureNote').textContent='Funding, mark price e open interest aparecem em USDⓈ-M Futures.';return}try{let [p,o]=await Promise.all([get('https://fapi.binance.com/fapi/v1/premiumIndex?symbol='+sym),get('https://fapi.binance.com/fapi/v1/openInterest?symbol='+sym)]);$('funding').textContent=(+p.lastFundingRate*100).toFixed(4)+'%';$('mark').textContent=money(+p.markPrice);$('oi').textContent=compact(+o.openInterest);$('fundTime').textContent=time(+p.nextFundingTime);$('futureTag').textContent='Dados públicos';$('futureNote').textContent='Open interest em unidades do ativo-base. Funding e OI não indicam direção por si sós.'}catch(e){$('futureTag').textContent='Indisponível';$('futureNote').textContent='Não foi possível obter todos os dados: '+e.message}}
 function evaluate(aa){
  const a=aa['15m'],ts=[trend(a),trend(aa['1h']),trend(aa['4h'])];let dir=null;
- $('trend').textContent='Tendência 15m / 1h / 4h: '+ts.join(' / ');
+ $('trend').textContent='Sinal calculado em 15m · Tendência 15m / 1h / 4h: '+ts.join(' / ');
  ['entry','stop','tp1','tp2','tp3','rr'].forEach(x=>$(x).textContent='—');
  if(!a||a.c.length<30||!Number.isFinite(a.r)||!Number.isFinite(a.a)||a.a<=0||!Number.isFinite(a.rv)){
   $('state').textContent='DADOS INSUFICIENTES';$('state').className='state';$('reason').textContent='Indicadores ou histórico inválidos. Nenhuma entrada foi avaliada.';return;
